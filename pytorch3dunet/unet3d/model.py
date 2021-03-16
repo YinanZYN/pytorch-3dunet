@@ -1,9 +1,14 @@
 import importlib
+import sys, os
+# sys.path.append(os.path.join(os.path.dirname("__file__"), '..', '..'))
+# sys.path.append(os.path.join(os.path.dirname("__file__"), '..', "pytorch3dunet"))
+# sys.path.append(os.path.join(os.path.dirname("__file__"), '..', '..', "pytorch3dunet"))
+
 
 import torch.nn as nn
 
-from pytorch3dunet.unet3d.buildingblocks import Encoder, Decoder, DoubleConv, ExtResNetBlock
-from pytorch3dunet.unet3d.utils import number_of_features_per_level
+from pytorch_3dunet.pytorch3dunet.unet3d.buildingblocks import Encoder, Decoder, DoubleConv, ExtResNetBlock
+from pytorch_3dunet.pytorch3dunet.unet3d.utils import number_of_features_per_level
 
 
 class Abstract3DUNet(nn.Module):
