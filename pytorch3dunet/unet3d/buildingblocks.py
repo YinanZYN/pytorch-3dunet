@@ -84,7 +84,6 @@ def create_conv(in_channels, out_channels, kernel_size, order, num_groups, paddi
             # use only one group if the given number of groups is greater than the number of channels
             if num_channels < num_groups:
                 num_groups = 1
-
             assert num_channels % num_groups == 0, f'Expected number of channels in input to be divisible by num_groups. num_channels={num_channels}, num_groups={num_groups}'
             modules.append(('groupnorm', nn.GroupNorm(num_groups=num_groups, num_channels=num_channels)))
         elif char == 'b':
@@ -155,7 +154,7 @@ class DoubleConv(nn.Sequential):
             # we're in the encoder path
             conv1_in_channels = in_channels
             conv1_out_channels = out_channels // 2
-            if conv1_out_channels < in_channels:
+            if conv1_out_channels < in_channels and in_channels%2 == 0:
                 conv1_out_channels = in_channels
             conv2_in_channels, conv2_out_channels = conv1_out_channels, out_channels
         else:
