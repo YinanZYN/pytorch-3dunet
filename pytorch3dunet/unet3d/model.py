@@ -7,8 +7,11 @@ import sys, os
 
 import torch.nn as nn
 
-from pytorch_3dunet.pytorch3dunet.unet3d.buildingblocks import Encoder, Decoder, DoubleConv, ExtResNetBlock
-from pytorch_3dunet.pytorch3dunet.unet3d.utils import number_of_features_per_level
+# from pytorch_3dunet.pytorch3dunet.unet3d.buildingblocks import Encoder, Decoder, DoubleConv, ExtResNetBlock
+# from pytorch_3dunet.pytorch3dunet.unet3d.utils import number_of_features_per_level
+from pytorch3dunet.unet3d.buildingblocks import Encoder, Decoder, DoubleConv, ExtResNetBlock
+from pytorch3dunet.unet3d.utils import number_of_features_per_level
+
 
 
 class Abstract3DUNet(nn.Module):
@@ -44,14 +47,18 @@ class Abstract3DUNet(nn.Module):
         conv_kernel_size (int or tuple): size of the convolving kernel in the basic_module
         pool_kernel_size (int or tuple): the size of the window
         conv_padding (int or tuple): add zero-padding added to all three sides of the input
+        n_decoder_heads_level(int): 0 means that the decoder starts from the base level (right after the encoder); range: [0, num_levels-2]
     """
 
     def __init__(self, in_channels, out_channels, final_sigmoid, basic_module, f_maps=64, layer_order='gcr',
                  num_groups=8, num_levels=4, is_segmentation=True, testing=False,
-                 conv_kernel_size=3, pool_kernel_size=2, conv_padding=1, **kwargs):
+                 conv_kernel_size=3, pool_kernel_size=2, conv_padding=1, n_decoder_heads=1, n_decoder_heads_init_level=0, **kwargs):
         super(Abstract3DUNet, self).__init__()
+        assert n_decoder_heads_init_level <= num_levels - 2
 
         self.testing = testing
+        self.n_decoder_heads = n_decoder_heads
+        self.n_decoder_heads_init_level = n_decoder_heads_init_level
 
         if isinstance(f_maps, int):
             f_maps = number_of_features_per_level(f_maps, num_levels=num_levels)
@@ -82,43 +89,56 @@ class Abstract3DUNet(nn.Module):
         self.encoders = nn.ModuleList(encoders)
 
         # create decoder path consisting of the Decoder modules. The length of the decoder is equal to `len(f_maps) - 1`
-        decoders = []
+        for k in range(n_decoder_heads):
+            decoders_k = []
+            setattr(self, 'decoders_%d' % k,  nn.ModuleList(decoders_k))
+        
+#         decoders = []
         reversed_f_maps = list(reversed(f_maps))
-        for i in range(len(reversed_f_maps) - 1):
-            if basic_module == DoubleConv:
-                in_feature_num = reversed_f_maps[i] + reversed_f_maps[i + 1]
+    
+        for k in range(n_decoder_heads):
+            decoders_k = getattr(self, 'decoders_%d' % k)
+
+            for i in range(len(reversed_f_maps) - 1):
+                if k != 0 and i < n_decoder_heads_init_level:
+                    continue
+                if basic_module == DoubleConv:
+                    in_feature_num = reversed_f_maps[i] + reversed_f_maps[i + 1]
+                else:
+                    in_feature_num = reversed_f_maps[i]
+
+                out_feature_num = reversed_f_maps[i + 1]
+                # TODO: if non-standard pooling was used, make sure to use correct striding for transpose conv
+                # currently strides with a constant stride: (2, 2, 2)
+                decoder = Decoder(in_feature_num, out_feature_num,
+                                  basic_module=basic_module,
+                                  conv_layer_order=layer_order,
+                                  conv_kernel_size=conv_kernel_size,
+                                  num_groups=num_groups,
+                                  padding=conv_padding)
+                decoders_k.append(decoder)
+
+#             self.decoders = nn.ModuleList(decoders)
+
+            # in the last layer a 1×1 convolution reduces the number of output
+            # channels to the number of labels
+            final_conv_k = nn.Conv3d(f_maps[0], out_channels, 1)
+            setattr(self, 'final_conv_%d' % k, final_conv_k)
+
+            if is_segmentation:
+                # semantic segmentation problem
+                if final_sigmoid:
+                    final_activation_k = nn.Sigmoid()
+                else:
+                    final_activation_k = nn.Softmax(dim=1)
             else:
-                in_feature_num = reversed_f_maps[i]
-
-            out_feature_num = reversed_f_maps[i + 1]
-            # TODO: if non-standard pooling was used, make sure to use correct striding for transpose conv
-            # currently strides with a constant stride: (2, 2, 2)
-            decoder = Decoder(in_feature_num, out_feature_num,
-                              basic_module=basic_module,
-                              conv_layer_order=layer_order,
-                              conv_kernel_size=conv_kernel_size,
-                              num_groups=num_groups,
-                              padding=conv_padding)
-            decoders.append(decoder)
-
-        self.decoders = nn.ModuleList(decoders)
-
-        # in the last layer a 1×1 convolution reduces the number of output
-        # channels to the number of labels
-        self.final_conv = nn.Conv3d(f_maps[0], out_channels, 1)
-
-        if is_segmentation:
-            # semantic segmentation problem
-            if final_sigmoid:
-                self.final_activation = nn.Sigmoid()
-            else:
-                self.final_activation = nn.Softmax(dim=1)
-        else:
-            # regression problem
-            self.final_activation = None
+                # regression problem
+                final_activation_k = None
+            setattr(self, 'final_activation_%d' % k, final_activation_k)
 
     def forward(self, x):
         # encoder part
+#         import pdb; pdb.set_trace()
         encoders_features = []
         for encoder in self.encoders:
             x = encoder(x)
@@ -128,21 +148,59 @@ class Abstract3DUNet(nn.Module):
         # remove the last encoder's output from the list
         # !!remember: it's the 1st in the list
         encoders_features = encoders_features[1:]
-
+        
         # decoder part
-        for decoder, encoder_features in zip(self.decoders, encoders_features):
+        
+        first_decoder_head_features_x = [] # the features (x) before each layer of the decoder
+        output_x = []
+        
+        # First decoder:
+        first_decoder_head_features_x.append(x)
+        for decoder, encoder_features in zip(self.decoders_0, encoders_features):
             # pass the output from the corresponding encoder and the output
             # of the previous decoder
             x = decoder(encoder_features, x)
+            first_decoder_head_features_x.append(x)
+#             import pdb; pdb.set_trace()
 
-        x = self.final_conv(x)
+        x = self.final_conv_0(x)
 
         # apply final_activation (i.e. Sigmoid or Softmax) only during prediction. During training the network outputs
         # logits and it's up to the user to normalize it before visualising with tensorboard or computing validation metric
-        if self.testing and self.final_activation is not None:
-            x = self.final_activation(x)
+        if self.testing and self.final_activation_0 is not None:
+            x = self.final_activation_0(x)
+            
+        first_decoder_head_features_x.append(x)
+        output_x.append(x)
+        
+        
+        # 2nd, 3rd, 4th ... decoder heads
+        for k in range(1, self.n_decoder_heads):
+            decoders_k = getattr(self, 'decoders_%d' % k) # a list of decoder layers
+            
+            decoder_layer_idx = 0 # which layer of the decoders to be used
+            for idx, encoder_features in enumerate(encoders_features):
+                if idx < self.n_decoder_heads_init_level:
+                    continue
+                elif idx == self.n_decoder_heads_init_level:
+                    x = decoders_k[decoder_layer_idx](encoder_features, first_decoder_head_features_x[idx])
+                else:
+                    x = decoders_k[decoder_layer_idx](encoder_features, x)
+                # use next layer next time
+#                 import pdb; pdb.set_trace()
+                decoder_layer_idx += 1
+            
+            final_conv_k = getattr(self, 'final_conv_%d' % k) 
+            x = final_conv_k(x)
+            
+            if self.testing and self.final_activation_0 is not None:
+                final_activation_k = getattr(self, 'final_activation_%d' % k)
+                x = final_activation_k(x)
+            
+            output_x.append(x)
+            
 
-        return x
+        return output_x
 
 
 class UNet3D(Abstract3DUNet):
@@ -214,3 +272,4 @@ def get_model(config):
     model_config = config['model']
     model_class = _model_class(model_config['name'])
     return model_class(**model_config)
+
